@@ -142,7 +142,8 @@ const QUALITY_FORMATS = {
   '1080': 'bv*[height<=1080]+ba/b[height<=1080]/b',
   '720': 'bv*[height<=720]+ba/b[height<=720]/b',
   '480': 'bv*[height<=480]+ba/b[height<=480]/b',
-  audio: 'ba/b'
+  audio: 'ba/b',
+  audio_opus: 'ba/b'
 };
 
 // ── Routes ───────────────────────────────────────────────────────────────
@@ -184,7 +185,8 @@ app.post('/api/info', rateLimit, async (req, res) => {
     if (maxHeight >= 1080) qualities.push({ label: '1080p', value: '1080' });
     if (maxHeight >= 720) qualities.push({ label: '720p', value: '720' });
     if (maxHeight >= 480 || maxHeight === 0) qualities.push({ label: '480p', value: '480' });
-    qualities.push({ label: '🎵 Audio saja (MP3)', value: 'audio' });
+    qualities.push({ label: '🎵 Audio (MP3)', value: 'audio' });
+    qualities.push({ label: '🎧 Audio (Opus)', value: 'audio_opus' });
 
     res.json({
       success: true,
@@ -213,7 +215,8 @@ app.get('/api/download', rateLimit, async (req, res) => {
   }
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ninzydl-'));
-  const isAudio = quality === 'audio';
+  const isAudio = quality === 'audio' || quality === 'audio_opus';
+  const audioFormat = quality === 'audio_opus' ? 'opus' : 'mp3';
 
   const args = [
     '--no-warnings', '--no-playlist', '--no-part', '--restrict-filenames',
@@ -222,7 +225,7 @@ app.get('/api/download', rateLimit, async (req, res) => {
   ];
 
   if (isAudio) {
-    args.push('-x', '--audio-format', 'mp3', '-f', QUALITY_FORMATS.audio);
+    args.push('-x', '--audio-format', audioFormat, '-f', QUALITY_FORMATS[quality]);
   } else {
     args.push('--merge-output-format', 'mp4', '-f', QUALITY_FORMATS[quality]);
   }
@@ -238,11 +241,13 @@ app.get('/api/download', rateLimit, async (req, res) => {
     const files = fs.readdirSync(tmpDir).filter(f => !f.startsWith('.'));
     if (!files.length) throw new Error('File hasil download tidak ditemukan.');
     const filePath = path.join(tmpDir, files[0]);
-    const ext = path.extname(files[0]).replace('.', '') || (isAudio ? 'mp3' : 'mp4');
+    const ext = path.extname(files[0]).replace('.', '') || (isAudio ? audioFormat : 'mp4');
     const stat = fs.statSync(filePath);
 
     const safeName = `ninzy_${crypto.randomBytes(3).toString('hex')}.${ext}`;
-    const contentType = isAudio ? 'audio/mpeg' : (ext === 'webm' ? 'video/webm' : 'video/mp4');
+    const contentType = isAudio
+      ? (audioFormat === 'opus' ? 'audio/opus' : 'audio/mpeg')
+      : (ext === 'webm' ? 'video/webm' : 'video/mp4');
 
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Length', stat.size);
