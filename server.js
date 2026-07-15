@@ -174,6 +174,10 @@ app.post('/api/info', rateLimit, async (req, res) => {
     if (!firstLine) throw new Error('Tidak bisa membaca info video.');
     const info = JSON.parse(firstLine);
 
+    // Post foto/slideshow (umum di TikTok, kadang IG) muncul sebagai
+    // "entries" berisi gambar-gambar, bukan satu video biasa.
+    const isPhotoSet = Array.isArray(info.entries) && info.entries.length > 0;
+
     const maxHeight = Math.max(
       0,
       ...((info.formats || [])
@@ -181,20 +185,27 @@ app.post('/api/info', rateLimit, async (req, res) => {
         .filter(h => Number.isFinite(h)))
     );
 
-    const qualities = [{ label: '🎬 Kualitas Terbaik', value: 'best' }];
-    if (maxHeight >= 1080) qualities.push({ label: '1080p', value: '1080' });
-    if (maxHeight >= 720) qualities.push({ label: '720p', value: '720' });
-    if (maxHeight >= 480 || maxHeight === 0) qualities.push({ label: '480p', value: '480' });
-    qualities.push({ label: '🎵 Audio (MP3)', value: 'audio' });
-    qualities.push({ label: '🎧 Audio (Opus)', value: 'audio_opus' });
+    let qualities;
+    if (isPhotoSet) {
+      qualities = [{ label: `📸 Download Semua Foto (${info.entries.length}) — ZIP`, value: 'photos' }];
+    } else {
+      qualities = [{ label: '🎬 Kualitas Terbaik', value: 'best' }];
+      if (maxHeight >= 1080) qualities.push({ label: '1080p', value: '1080' });
+      if (maxHeight >= 720) qualities.push({ label: '720p', value: '720' });
+      if (maxHeight >= 480 || maxHeight === 0) qualities.push({ label: '480p', value: '480' });
+      qualities.push({ label: '🎵 Audio (MP3)', value: 'audio' });
+      qualities.push({ label: '🎧 Audio (Opus)', value: 'audio_opus' });
+    }
 
     res.json({
       success: true,
-      title: info.title || 'Video',
+      title: info.title || (isPhotoSet ? 'Postingan Foto' : 'Video'),
       thumbnail: info.thumbnail || (info.thumbnails && info.thumbnails.length ? info.thumbnails.at(-1).url : ''),
       duration: info.duration || 0,
       uploader: info.uploader || info.channel || '',
       platform: detectPlatform(url),
+      isPhotoSet,
+      photoCount: isPhotoSet ? info.entries.length : 0,
       qualities
     });
   } catch (e) {
@@ -210,23 +221,29 @@ app.get('/api/download', rateLimit, async (req, res) => {
   if (!isSupportedUrl(url)) {
     return res.status(400).json({ success: false, error: 'Link harus dari TikTok atau YouTube.' });
   }
-  if (!QUALITY_FORMATS[quality]) {
+  if (quality !== 'photos' && !QUALITY_FORMATS[quality]) {
     return res.status(400).json({ success: false, error: 'Pilihan kualitas tidak valid.' });
   }
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ninzydl-'));
+  const isPhotos = quality === 'photos';
   const isAudio = quality === 'audio' || quality === 'audio_opus';
   const audioFormat = quality === 'audio_opus' ? 'opus' : 'mp3';
 
   const args = [
-    '--no-warnings', '--no-playlist', '--no-part', '--restrict-filenames',
-    '--socket-timeout', '20',
-    '-o', path.join(tmpDir, '%(id)s.%(ext)s')
+    '--no-warnings', '--no-part', '--restrict-filenames',
+    '--socket-timeout', '20'
   ];
 
-  if (isAudio) {
+  if (isPhotos) {
+    // Slideshow foto: ambil SEMUA gambar dalam post ini (bukan playlist
+    // eksternal), lalu nanti di-zip jadi satu file.
+    args.push('--yes-playlist', '-o', path.join(tmpDir, '%(playlist_index|1)s.%(ext)s'));
+  } else if (isAudio) {
+    args.push('--no-playlist', '-o', path.join(tmpDir, '%(id)s.%(ext)s'));
     args.push('-x', '--audio-format', audioFormat, '-f', QUALITY_FORMATS[quality]);
   } else {
+    args.push('--no-playlist', '-o', path.join(tmpDir, '%(id)s.%(ext)s'));
     args.push('--merge-output-format', 'mp4', '-f', QUALITY_FORMATS[quality]);
   }
   args.push(...cookieArgs(), url);
@@ -236,7 +253,31 @@ app.get('/api/download', rateLimit, async (req, res) => {
   };
 
   try {
-    await runYtDlp(args);
+    await runYtDlp(args, isPhotos ? { timeoutMs: PROCESS_TIMEOUT_MS } : undefined);
+
+    if (isPhotos) {
+      const files = fs.readdirSync(tmpDir).filter(f => !f.startsWith('.'));
+      if (!files.length) throw new Error('Foto tidak ditemukan di post ini.');
+
+      const zipPath = path.join(tmpDir, 'photos.zip');
+      await new Promise((resolve, reject) => {
+        const zip = spawn('zip', ['-j', zipPath, ...files.map(f => path.join(tmpDir, f))], { windowsHide: true });
+        zip.on('error', reject);
+        zip.on('close', code => code === 0 ? resolve() : reject(new Error('Gagal membuat file ZIP.')));
+      });
+
+      const stat = fs.statSync(zipPath);
+      const safeName = `ninzy_foto_${crypto.randomBytes(3).toString('hex')}.zip`;
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Length', stat.size);
+      res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+
+      const stream = fs.createReadStream(zipPath);
+      stream.pipe(res);
+      stream.on('close', cleanup);
+      stream.on('error', () => { cleanup(); if (!res.headersSent) res.status(500).end(); });
+      return;
+    }
 
     const files = fs.readdirSync(tmpDir).filter(f => !f.startsWith('.'));
     if (!files.length) throw new Error('File hasil download tidak ditemukan.');
