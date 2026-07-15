@@ -39,6 +39,16 @@ const PORT = process.env.PORT || 3000;
 const YTDLP_BIN = process.env.YTDLP_BIN || 'yt-dlp';
 const PROCESS_TIMEOUT_MS = 3 * 60 * 1000; // 3 menit maksimum per proses
 
+// ── Cookies opsional (buat Instagram/Facebook yang kadang butuh login) ────
+// Kalau kamu punya masalah "login required" khusus IG/FB, taruh file
+// cookies (format Netscape, hasil export dari extension "Get cookies.txt")
+// bernama cookies.txt di folder yang sama dengan server.js, lalu redeploy.
+// Kalau file tidak ada, opsi ini otomatis diskip (tidak error).
+const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
+function cookieArgs() {
+  return fs.existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : [];
+}
+
 // ── Rate limit sederhana (per IP, in-memory) ────────────────────────────
 const rateMap = new Map();
 function rateLimit(req, res, next) {
@@ -67,7 +77,10 @@ function isSupportedUrl(url) {
     return /(^|\.)tiktok\.com$/.test(host) ||
            /(^|\.)youtube\.com$/.test(host) ||
            /(^|\.)youtu\.be$/.test(host) ||
-           /(^|\.)vt\.tiktok\.com$/.test(host);
+           /(^|\.)vt\.tiktok\.com$/.test(host) ||
+           /(^|\.)instagram\.com$/.test(host) ||
+           /(^|\.)facebook\.com$/.test(host) ||
+           /(^|\.)fb\.watch$/.test(host);
   } catch {
     return false;
   }
@@ -76,6 +89,8 @@ function isSupportedUrl(url) {
 function detectPlatform(url) {
   if (/tiktok\.com/i.test(url)) return 'TikTok';
   if (/youtube\.com|youtu\.be/i.test(url)) return 'YouTube';
+  if (/instagram\.com/i.test(url)) return 'Instagram';
+  if (/facebook\.com|fb\.watch/i.test(url)) return 'Facebook';
   return 'Video';
 }
 
@@ -111,10 +126,10 @@ function runYtDlp(args, { timeoutMs = PROCESS_TIMEOUT_MS } = {}) {
 function friendlyError(rawMessage) {
   const msg = (rawMessage || '').toLowerCase();
   if (msg.includes('timeout')) return 'Server terlalu lama merespons, coba lagi.';
-  if (msg.includes('private') || msg.includes('login required')) return 'Video ini privat / butuh login, tidak bisa diunduh.';
+  if (msg.includes('private') || msg.includes('login required') || msg.includes('rate-limit') || msg.includes('restricted video')) return 'Konten ini privat atau butuh login (sering terjadi di Instagram/Facebook untuk konten tertentu).';
   if (msg.includes('unavailable') || msg.includes('not available') || msg.includes('404')) return 'Video tidak ditemukan atau sudah dihapus.';
   if (msg.includes('geo') || msg.includes('country')) return 'Video ini dibatasi wilayah (geo-blocked).';
-  if (msg.includes('unsupported url') || msg.includes('is not a valid url')) return 'Link tidak dikenali. Pastikan link TikTok / YouTube valid.';
+  if (msg.includes('unsupported url') || msg.includes('is not a valid url')) return 'Link tidak dikenali. Pastikan link TikTok/YouTube/Instagram/Facebook valid.';
   if (msg.includes('sign in') || msg.includes('confirm you')) return 'Video butuh verifikasi akun, tidak bisa diunduh otomatis.';
   return 'Gagal memproses video. Coba link lain atau ulangi beberapa saat lagi.';
 }
@@ -151,7 +166,7 @@ app.post('/api/info', rateLimit, async (req, res) => {
 
   try {
     const { stdout } = await runYtDlp([
-      '-j', '--no-warnings', '--no-playlist', '--socket-timeout', '20', url
+      '-j', '--no-warnings', '--no-playlist', '--socket-timeout', '20', ...cookieArgs(), url
     ], { timeoutMs: 45000 });
 
     const firstLine = stdout.split('\n').find(l => l.trim().startsWith('{'));
@@ -211,7 +226,7 @@ app.get('/api/download', rateLimit, async (req, res) => {
   } else {
     args.push('--merge-output-format', 'mp4', '-f', QUALITY_FORMATS[quality]);
   }
-  args.push(url);
+  args.push(...cookieArgs(), url);
 
   const cleanup = () => {
     fs.rm(tmpDir, { recursive: true, force: true }, () => {});
