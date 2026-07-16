@@ -129,16 +129,14 @@ function cookieArgs() {
   return fs.existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : [];
 }
 
-// ── YouTube "Sign in to confirm you're not a bot" workaround ─────────────
-// Sejak awal 2026 YouTube makin agresif nge-block akses dari IP server/cloud
-// (termasuk Railway). Minta yt-dlp nyamar sebagai client Android biasanya
-// berhasil ngelewatin blokir ini untuk kebanyakan video publik, tanpa perlu
-// cookies. Kalau masih gagal juga di video tertentu, cookies.txt (di atas)
-// jadi jalan pintas berikutnya.
+// ── YouTube "Sign in to confirm you're not a bot" ─────────────────────────
+// Sebagian besar kasus ini sebenarnya soal yt-dlp gak punya JS runtime buat
+// mecahin tantangan signature YouTube (lihat instalasi Deno di Dockerfile),
+// bukan soal client spoofing. Biarin yt-dlp pakai daftar client bawaannya
+// sendiri (yang sudah otomatis multi-fallback) — jangan dipaksa satu client
+// karena itu malah bisa lebih gampang gagal dibanding default-nya.
 function ytClientArgs(url) {
-  return /youtube\.com|youtu\.be/i.test(url)
-    ? ['--extractor-args', 'youtube:player_client=android']
-    : [];
+  return [];
 }
 
 // ── Rate limit sederhana (per IP, in-memory) ────────────────────────────
@@ -355,6 +353,7 @@ app.post('/api/info', rateLimit, async (req, res) => {
     );
 
     let qualities;
+    let subtitleLanguages = [];
     if (isPhotoSet) {
       qualities = [{ label: `📸 Download Semua Foto (${info.entries.length}) — ZIP`, value: 'photos' }];
     } else {
@@ -365,11 +364,29 @@ app.post('/api/info', rateLimit, async (req, res) => {
       qualities.push({ label: '🎵 Audio (MP3)', value: 'audio' });
       qualities.push({ label: '🎧 Audio (Opus)', value: 'audio_opus' });
 
-      // Subtitle cuma ditawarin kalau videonya beneran punya subtitle
-      // (manual atau auto-generated) — biar gak nampilin opsi yang bakal gagal.
-      const hasSubs = (info.subtitles && Object.keys(info.subtitles).length > 0) ||
-                      (info.automatic_captions && Object.keys(info.automatic_captions).length > 0);
-      if (hasSubs) qualities.push({ label: '📝 Subtitle (.srt)', value: 'subtitle' });
+      // Kumpulin SEMUA bahasa subtitle yang beneran ada di video ini —
+      // manual dulu (kualitas lebih bagus), baru auto-generated. Auto-
+      // generated dibatasi ke bahasa umum aja (bukan semua ratusan hasil
+      // auto-translate YouTube) biar daftarnya gak kepanjangan.
+      if (info.subtitles) {
+        for (const lang of Object.keys(info.subtitles)) {
+          subtitleLanguages.push({ lang, auto: false });
+        }
+      }
+      const commonAutoLangs = ['id', 'en', 'ja', 'ko', 'zh-Hans', 'zh-Hant', 'es', 'ar', 'hi', 'pt', 'fr', 'de', 'ru', 'th', 'vi'];
+      if (info.automatic_captions) {
+        for (const lang of commonAutoLangs) {
+          if (info.automatic_captions[lang] && !subtitleLanguages.find(s => s.lang === lang)) {
+            subtitleLanguages.push({ lang, auto: true });
+          }
+        }
+        // Bahasa asli video (biasanya paling akurat auto-generated-nya)
+        // kadang codenya spesifik & gak masuk daftar umum di atas.
+        const origKey = Object.keys(info.automatic_captions).find(k => k.endsWith('-orig'));
+        if (origKey && !subtitleLanguages.find(s => s.lang === origKey)) {
+          subtitleLanguages.push({ lang: origKey, auto: true });
+        }
+      }
     }
 
     const hasThumbnail = !!(info.thumbnail || (info.thumbnails && info.thumbnails.length));
@@ -388,6 +405,7 @@ app.post('/api/info', rateLimit, async (req, res) => {
       likeCount: formatCount(info.like_count),
       commentCount: formatCount(info.comment_count),
       uploadDate: formatUploadDate(info.upload_date),
+      subtitleLanguages,
       qualities
     });
   } catch (e) {
@@ -396,7 +414,7 @@ app.post('/api/info', rateLimit, async (req, res) => {
 });
 
 app.get('/api/download', rateLimit, async (req, res) => {
-  const { url, quality = 'best', trimStart, trimEnd } = req.query;
+  const { url, quality = 'best', trimStart, trimEnd, subLang } = req.query;
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ success: false, error: 'URL wajib diisi.' });
   }
@@ -437,12 +455,15 @@ app.get('/api/download', rateLimit, async (req, res) => {
       '-o', path.join(tmpDir, '%(id)s.%(ext)s')
     );
   } else if (isSubtitle) {
-    // Cuma subtitle-nya aja, gak download videonya. Ambil manual dulu kalau
-    // ada, fallback ke auto-generated. Prioritas Indonesia + Inggris.
+    // Cuma subtitle-nya aja, gak download videonya. Kalau user milih bahasa
+    // spesifik, pakai itu; kalau enggak, fallback ke daftar default lama.
+    const safeSubLang = (typeof subLang === 'string' && /^[a-zA-Z0-9,-]{1,40}$/.test(subLang))
+      ? subLang
+      : 'id,en,id-ID,en-US,en-orig';
     args.push(
       '--no-playlist', '--skip-download',
       '--write-subs', '--write-auto-subs',
-      '--sub-langs', 'id,en,id-ID,en-US,en-orig',
+      '--sub-langs', safeSubLang,
       '--convert-subs', 'srt',
       '-o', path.join(tmpDir, '%(id)s.%(ext)s')
     );
