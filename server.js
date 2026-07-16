@@ -353,6 +353,7 @@ app.post('/api/info', rateLimit, async (req, res) => {
     );
 
     let qualities;
+    let subtitleLanguages = [];
     if (isPhotoSet) {
       qualities = [{ label: `📸 Download Semua Foto (${info.entries.length}) — ZIP`, value: 'photos' }];
     } else {
@@ -363,11 +364,29 @@ app.post('/api/info', rateLimit, async (req, res) => {
       qualities.push({ label: '🎵 Audio (MP3)', value: 'audio' });
       qualities.push({ label: '🎧 Audio (Opus)', value: 'audio_opus' });
 
-      // Subtitle cuma ditawarin kalau videonya beneran punya subtitle
-      // (manual atau auto-generated) — biar gak nampilin opsi yang bakal gagal.
-      const hasSubs = (info.subtitles && Object.keys(info.subtitles).length > 0) ||
-                      (info.automatic_captions && Object.keys(info.automatic_captions).length > 0);
-      if (hasSubs) qualities.push({ label: '📝 Subtitle (.srt)', value: 'subtitle' });
+      // Kumpulin SEMUA bahasa subtitle yang beneran ada di video ini —
+      // manual dulu (kualitas lebih bagus), baru auto-generated. Auto-
+      // generated dibatasi ke bahasa umum aja (bukan semua ratusan hasil
+      // auto-translate YouTube) biar daftarnya gak kepanjangan.
+      if (info.subtitles) {
+        for (const lang of Object.keys(info.subtitles)) {
+          subtitleLanguages.push({ lang, auto: false });
+        }
+      }
+      const commonAutoLangs = ['id', 'en', 'ja', 'ko', 'zh-Hans', 'zh-Hant', 'es', 'ar', 'hi', 'pt', 'fr', 'de', 'ru', 'th', 'vi'];
+      if (info.automatic_captions) {
+        for (const lang of commonAutoLangs) {
+          if (info.automatic_captions[lang] && !subtitleLanguages.find(s => s.lang === lang)) {
+            subtitleLanguages.push({ lang, auto: true });
+          }
+        }
+        // Bahasa asli video (biasanya paling akurat auto-generated-nya)
+        // kadang codenya spesifik & gak masuk daftar umum di atas.
+        const origKey = Object.keys(info.automatic_captions).find(k => k.endsWith('-orig'));
+        if (origKey && !subtitleLanguages.find(s => s.lang === origKey)) {
+          subtitleLanguages.push({ lang: origKey, auto: true });
+        }
+      }
     }
 
     const hasThumbnail = !!(info.thumbnail || (info.thumbnails && info.thumbnails.length));
@@ -386,6 +405,7 @@ app.post('/api/info', rateLimit, async (req, res) => {
       likeCount: formatCount(info.like_count),
       commentCount: formatCount(info.comment_count),
       uploadDate: formatUploadDate(info.upload_date),
+      subtitleLanguages,
       qualities
     });
   } catch (e) {
@@ -394,7 +414,7 @@ app.post('/api/info', rateLimit, async (req, res) => {
 });
 
 app.get('/api/download', rateLimit, async (req, res) => {
-  const { url, quality = 'best', trimStart, trimEnd } = req.query;
+  const { url, quality = 'best', trimStart, trimEnd, subLang, skipSponsor } = req.query;
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ success: false, error: 'URL wajib diisi.' });
   }
@@ -410,6 +430,11 @@ app.get('/api/download', rateLimit, async (req, res) => {
   const ts = Number(trimStart), te = Number(trimEnd);
   const hasTrim = Number.isFinite(ts) && Number.isFinite(te) && ts >= 0 && te > ts &&
                   !['photos', 'subtitle', 'thumbnail', 'preview'].includes(quality);
+
+  // SponsorBlock: cuma masuk akal buat YouTube (data komunitasnya cuma ada
+  // di sana), dan cuma buat video/audio biasa sama kayak trim.
+  const hasSponsorSkip = skipSponsor === '1' && /youtube\.com|youtu\.be/i.test(url) &&
+                         !['photos', 'subtitle', 'thumbnail', 'preview'].includes(quality);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ninzydl-'));
   const isPhotos = quality === 'photos';
@@ -435,23 +460,30 @@ app.get('/api/download', rateLimit, async (req, res) => {
       '-o', path.join(tmpDir, '%(id)s.%(ext)s')
     );
   } else if (isSubtitle) {
-    // Cuma subtitle-nya aja, gak download videonya. Ambil manual dulu kalau
-    // ada, fallback ke auto-generated. Prioritas Indonesia + Inggris.
+    // Cuma subtitle-nya aja, gak download videonya. Kalau user milih bahasa
+    // spesifik, pakai itu; kalau enggak, fallback ke daftar default lama.
+    const safeSubLang = (typeof subLang === 'string' && /^[a-zA-Z0-9,-]{1,40}$/.test(subLang))
+      ? subLang
+      : 'id,en,id-ID,en-US,en-orig';
     args.push(
       '--no-playlist', '--skip-download',
       '--write-subs', '--write-auto-subs',
-      '--sub-langs', 'id,en,id-ID,en-US,en-orig',
+      '--sub-langs', safeSubLang,
       '--convert-subs', 'srt',
       '-o', path.join(tmpDir, '%(id)s.%(ext)s')
     );
   } else if (isAudio) {
     args.push('--no-playlist', '-o', path.join(tmpDir, '%(id)s.%(ext)s'));
     args.push('-x', '--audio-format', audioFormat, '-f', QUALITY_FORMATS[quality]);
-    if (hasTrim) args.push('--download-sections', `*${ts}-${te}`, '--force-keyframes-at-cuts');
+    if (hasSponsorSkip) args.push('--sponsorblock-remove', 'sponsor,selfpromo,interaction,intro,outro');
+    if (hasTrim) args.push('--download-sections', `*${ts}-${te}`);
+    if (hasTrim || hasSponsorSkip) args.push('--force-keyframes-at-cuts');
   } else {
     args.push('--no-playlist', '-o', path.join(tmpDir, '%(id)s.%(ext)s'));
     args.push('--merge-output-format', 'mp4', '-f', QUALITY_FORMATS[quality]);
-    if (hasTrim) args.push('--download-sections', `*${ts}-${te}`, '--force-keyframes-at-cuts');
+    if (hasSponsorSkip) args.push('--sponsorblock-remove', 'sponsor,selfpromo,interaction,intro,outro');
+    if (hasTrim) args.push('--download-sections', `*${ts}-${te}`);
+    if (hasTrim || hasSponsorSkip) args.push('--force-keyframes-at-cuts');
   }
   args.push(...cookieArgs(), ...ytClientArgs(url), url);
 
