@@ -191,7 +191,13 @@ function isSupportedUrl(url) {
            /(^|\.)vt\.tiktok\.com$/.test(host) ||
            /(^|\.)instagram\.com$/.test(host) ||
            /(^|\.)facebook\.com$/.test(host) ||
-           /(^|\.)fb\.watch$/.test(host);
+           /(^|\.)fb\.watch$/.test(host) ||
+           /(^|\.)twitter\.com$/.test(host) ||
+           /(^|\.)x\.com$/.test(host) ||
+           /(^|\.)reddit\.com$/.test(host) ||
+           /(^|\.)redd\.it$/.test(host) ||
+           /(^|\.)soundcloud\.com$/.test(host) ||
+           /(^|\.)twitch\.tv$/.test(host);
   } catch {
     return false;
   }
@@ -202,6 +208,10 @@ function detectPlatform(url) {
   if (/youtube\.com|youtu\.be/i.test(url)) return 'YouTube';
   if (/instagram\.com/i.test(url)) return 'Instagram';
   if (/facebook\.com|fb\.watch/i.test(url)) return 'Facebook';
+  if (/twitter\.com|x\.com/i.test(url)) return 'Twitter/X';
+  if (/reddit\.com|redd\.it/i.test(url)) return 'Reddit';
+  if (/soundcloud\.com/i.test(url)) return 'SoundCloud';
+  if (/twitch\.tv/i.test(url)) return 'Twitch';
   return 'Video';
 }
 
@@ -405,6 +415,7 @@ app.post('/api/info', rateLimit, async (req, res) => {
       likeCount: formatCount(info.like_count),
       commentCount: formatCount(info.comment_count),
       uploadDate: formatUploadDate(info.upload_date),
+      description: (info.description || '').slice(0, 3000),
       subtitleLanguages,
       qualities
     });
