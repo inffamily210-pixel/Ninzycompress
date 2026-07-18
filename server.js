@@ -1110,25 +1110,43 @@ app.get('/api/creator-profile', rateLimit, async (req, res) => {
     return res.status(400).json({ success: false, error: 'URL profil tidak valid.' });
   }
   try {
+    // PENTING: TANPA --flat-playlist di sini. Flat-playlist emang cepat,
+    // tapi field thumbnail/avatar level-channel gak pernah ke-resolve dalam
+    // mode itu (limitation yt-dlp yang udah lama, lihat issue #4961/#9983) --
+    // hasilnya avatar profil selalu kosong walau request "berhasil". Jadi
+    // kita pakai mode normal tapi DIBATASI 1 item (--playlist-items 1) biar
+    // yt-dlp cuma perlu resolve 1 video buat dapetin info channel-nya,
+    // bukan buka semua video di channel itu (yang jelas jauh lebih lambat).
     const { stdout } = await runYtDlp([
-      '--flat-playlist', '--dump-single-json', '--playlist-items', '0',
-      '--no-warnings', '--socket-timeout', '10', ...cookieArgs(), ...ytClientArgs(url), url
-    ], { timeoutMs: 20000 });
+      '--dump-single-json', '--playlist-items', '1',
+      '--no-warnings', '--socket-timeout', '15', ...cookieArgs(), ...ytClientArgs(url), url
+    ], { timeoutMs: 25000 });
 
     const data = JSON.parse(stdout.split('\n').find(l => l.trim().startsWith('{')) || '{}');
     const avatar = (data.thumbnails && data.thumbnails.length) ? data.thumbnails.at(-1).url : (data.thumbnail || null);
 
     // "Total video" biasanya keliatan dari jumlah entries hasil flat-playlist
-    // (walau di sini kita batasi 0 entri buat kecepatan, beberapa extractor
+    // (walau di sini kita batasi 1 entri buat kecepatan, beberapa extractor
     // tetep ngasih playlist_count di root objek).
     const totalVideos = Number.isFinite(data.playlist_count) ? data.playlist_count
       : (Number.isFinite(data.n_entries) ? data.n_entries : null);
 
+    // Fallback nama/avatar: kalau field level-channel kosong, coba ambil
+    // dari entry video pertama (entries[0]) yang mungkin masih ke-bawa di
+    // hasil ekstraksi tergantung versi yt-dlp/extractor.
+    const firstEntry = (Array.isArray(data.entries) && data.entries[0]) || null;
+    const name = data.channel || data.uploader || data.title || (firstEntry && (firstEntry.channel || firstEntry.uploader)) || null;
+    const resolvedAvatar = avatar || (firstEntry && firstEntry.thumbnails && firstEntry.thumbnails.length ? firstEntry.thumbnails.at(-1).url : null);
+
+    if (!name && !resolvedAvatar) {
+      throw new Error('Profil kosong / gak ketemu.');
+    }
+
     res.json({
       success: true,
-      name: data.channel || data.uploader || data.title || null,
+      name,
       handle: data.uploader_id || data.channel_id || null,
-      avatar,
+      avatar: resolvedAvatar,
       followers: formatCount(data.channel_follower_count),
       bio: data.description ? data.description.slice(0, 600) : null,
       isVerified: !!(data.channel_is_verified || data.uploader_verified || data.is_verified || data.artist_verified),
