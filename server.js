@@ -294,13 +294,28 @@ function friendlyError(rawMessage) {
 // Format selector per tingkat kualitas. Semua punya fallback chain (pakai "/")
 // supaya kalau kualitas tertentu tidak tersedia, otomatis turun ke yang ada
 // -- tujuannya supaya tidak pernah gagal total karena format tidak ketemu.
+//
+// CATATAN soal "8K": diminta di daftar fitur, tapi gak dimasukin di sini.
+// Alasannya: gak ada satupun platform yang didukung tool ini (TikTok,
+// YouTube, IG, FB, Twitter/X, Reddit, SoundCloud, Twitch) yang nyediain
+// upload asli di atas 4K — nawarin pilihan "8K" yang gak pernah bisa
+// kepenuhi cuma bakal bikin user nyoba, gagal, dan mikir tool-nya rusak.
+// Cap tertinggi realistis ya 2160p (4K), dan itu pun cuma buat video yang
+// sumbernya emang di-upload 4K (YouTube kebanyakan).
 const QUALITY_FORMATS = {
   best: 'bv*+ba/b',
+  '2160': 'bv*[height<=2160]+ba/b[height<=2160]/b',
+  '1440': 'bv*[height<=1440]+ba/b[height<=1440]/b',
   '1080': 'bv*[height<=1080]+ba/b[height<=1080]/b',
   '720': 'bv*[height<=720]+ba/b[height<=720]/b',
   '480': 'bv*[height<=480]+ba/b[height<=480]/b',
+  '360': 'bv*[height<=360]+ba/b[height<=360]/b',
+  '240': 'bv*[height<=240]+ba/b[height<=240]/b',
+  '144': 'bv*[height<=144]+ba/b[height<=144]/b',
   audio: 'ba/b',
   audio_opus: 'ba/b',
+  audio_m4a: 'ba[ext=m4a]/ba/b',
+  audio_aac: 'ba/b',
   // Preview: prioritaskan format yang video+audio-nya udah nyatu (progresif)
   // biar gak perlu proses merge ffmpeg — respons lebih cepat buat sekadar
   // pratinjau sebelum download beneran.
@@ -407,11 +422,20 @@ app.post('/api/info', rateLimit, async (req, res) => {
       ];
     } else {
       qualities = [{ label: '🎬 Kualitas Terbaik', value: 'best' }];
+      // Cuma nawarin tingkat kualitas yang beneran ada di video ini (gak
+      // ada gunanya nawarin 1080p buat video yang sumbernya cuma 480p —
+      // bakal ke-upscale palsu atau malah gagal format-nya).
+      if (maxHeight >= 2160) qualities.push({ label: '2160p (4K)', value: '2160' });
+      if (maxHeight >= 1440) qualities.push({ label: '1440p (2K)', value: '1440' });
       if (maxHeight >= 1080) qualities.push({ label: '1080p', value: '1080' });
       if (maxHeight >= 720) qualities.push({ label: '720p', value: '720' });
       if (maxHeight >= 480 || maxHeight === 0) qualities.push({ label: '480p', value: '480' });
+      if (maxHeight >= 360) qualities.push({ label: '360p', value: '360' });
+      if (maxHeight >= 240) qualities.push({ label: '240p', value: '240' });
+      if (maxHeight >= 144) qualities.push({ label: '144p (hemat kuota)', value: '144' });
       qualities.push({ label: '🎵 Audio (MP3)', value: 'audio' });
       qualities.push({ label: '🎧 Audio (Opus)', value: 'audio_opus' });
+      qualities.push({ label: '🎼 Audio (M4A)', value: 'audio_m4a' });
 
       // Kumpulin SEMUA bahasa subtitle yang beneran ada di video ini —
       // manual dulu (kualitas lebih bagus), baru auto-generated. Auto-
@@ -492,7 +516,7 @@ app.post('/api/info', rateLimit, async (req, res) => {
 });
 
 app.get('/api/download', rateLimit, async (req, res) => {
-  const { url, quality = 'best', trimStart, trimEnd, subLang, skipSponsor } = req.query;
+  const { url, quality = 'best', trimStart, trimEnd, subLang, skipSponsor, format } = req.query;
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ success: false, error: 'URL wajib diisi.' });
   }
@@ -501,6 +525,13 @@ app.get('/api/download', rateLimit, async (req, res) => {
   }
   if (quality !== 'photos' && quality !== 'photos_video' && quality !== 'subtitle' && quality !== 'thumbnail' && quality !== 'music' && !QUALITY_FORMATS[quality]) {
     return res.status(400).json({ success: false, error: 'Pilihan kualitas tidak valid.' });
+  }
+  // Container video: cuma relevan buat download video biasa (bukan audio,
+  // foto, subtitle, atau thumbnail — itu semua punya ekstensi tetap sendiri).
+  const VALID_VIDEO_FORMATS = ['mp4', 'webm', 'mkv'];
+  const videoFormat = VALID_VIDEO_FORMATS.includes(format) ? format : null;
+  if (format && !videoFormat) {
+    return res.status(400).json({ success: false, error: 'Format video gak didukung. Pilih MP4, WEBM, atau MKV.' });
   }
 
   // Trim durasi: cuma berlaku buat download video/audio biasa, bukan buat
@@ -521,8 +552,8 @@ app.get('/api/download', rateLimit, async (req, res) => {
   const isThumbnail = quality === 'thumbnail';
   const isPreview = quality === 'preview';
   const isMusic = quality === 'music';
-  const isAudio = quality === 'audio' || quality === 'audio_opus' || isMusic;
-  const audioFormat = quality === 'audio_opus' ? 'opus' : 'mp3';
+  const isAudio = quality === 'audio' || quality === 'audio_opus' || quality === 'audio_m4a' || isMusic;
+  const audioFormat = quality === 'audio_opus' ? 'opus' : (quality === 'audio_m4a' ? 'm4a' : 'mp3');
 
   const args = [
     '--no-warnings', '--no-part', '--restrict-filenames',
@@ -565,7 +596,14 @@ app.get('/api/download', rateLimit, async (req, res) => {
     if (hasTrim || hasSponsorSkip) args.push('--force-keyframes-at-cuts');
   } else {
     args.push('--no-playlist', '-o', path.join(tmpDir, '%(id)s.%(ext)s'));
-    args.push('--merge-output-format', 'mp4', '-f', QUALITY_FORMATS[quality]);
+    const outputFormat = videoFormat || 'mp4';
+    args.push('--merge-output-format', outputFormat, '-f', QUALITY_FORMATS[quality]);
+    // --remux-video ganti container tanpa re-encode ulang video/audio-nya
+    // (cepat, gak makan resource server) — cukup buat kebanyakan kasus.
+    // MKV paling fleksibel nampung codec apa aja, WEBM/MP4 kadang perlu
+    // yt-dlp fallback ke recode otomatis kalau kombinasi codec-nya emang
+    // gak didukung container itu, tapi itu ditangani yt-dlp sendiri.
+    if (videoFormat) args.push('--remux-video', videoFormat);
     if (hasSponsorSkip) args.push('--sponsorblock-remove', 'sponsor,selfpromo,interaction,intro,outro');
     if (hasTrim) args.push('--download-sections', `*${ts}-${te}`);
     if (hasTrim || hasSponsorSkip) args.push('--force-keyframes-at-cuts');
@@ -714,8 +752,8 @@ app.get('/api/download', rateLimit, async (req, res) => {
 
     const safeName = `ninzy_${isMusic ? 'lagu' : ''}${crypto.randomBytes(3).toString('hex')}.${ext}`;
     const contentType = isAudio
-      ? (audioFormat === 'opus' ? 'audio/opus' : 'audio/mpeg')
-      : (ext === 'webm' ? 'video/webm' : 'video/mp4');
+      ? (audioFormat === 'opus' ? 'audio/opus' : audioFormat === 'm4a' ? 'audio/mp4' : 'audio/mpeg')
+      : (ext === 'webm' ? 'video/webm' : ext === 'mkv' ? 'video/x-matroska' : 'video/mp4');
 
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Length', stat.size);
@@ -745,8 +783,8 @@ const BATCH_MAX_URLS = 5;
 async function runBatchDownload(cleanUrls, quality, res) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ninzybatch-'));
   const cleanup = () => fs.rm(tmpDir, { recursive: true, force: true }, () => {});
-  const isAudio = quality === 'audio' || quality === 'audio_opus';
-  const audioFormat = quality === 'audio_opus' ? 'opus' : 'mp3';
+  const isAudio = quality === 'audio' || quality === 'audio_opus' || quality === 'audio_m4a';
+  const audioFormat = quality === 'audio_opus' ? 'opus' : (quality === 'audio_m4a' ? 'm4a' : 'mp3');
   const results = []; // { url, ok, error? } — dikirim balik lewat header biar frontend bisa nampilin ringkasan
 
   try {
@@ -832,7 +870,7 @@ app.post('/api/batch-download', batchRateLimit, async (req, res) => {
       return res.status(400).json({ success: false, error: `Link tidak didukung: ${u}` });
     }
   }
-  if (!['best', '1080', '720', '480', 'audio', 'audio_opus'].includes(quality)) {
+  if (!['best', '2160', '1440', '1080', '720', '480', '360', '240', '144', 'audio', 'audio_opus', 'audio_m4a'].includes(quality)) {
     return res.status(400).json({ success: false, error: 'Pilihan kualitas tidak valid untuk batch.' });
   }
 
@@ -1300,7 +1338,7 @@ app.post('/api/creator-download-all', batchRateLimit, async (req, res) => {
   if (!profileUrl || typeof profileUrl !== 'string' || !isSupportedUrl(profileUrl)) {
     return res.status(400).json({ success: false, error: 'URL profil tidak valid.' });
   }
-  if (!['best', '1080', '720', '480', 'audio', 'audio_opus'].includes(quality)) {
+  if (!['best', '2160', '1440', '1080', '720', '480', '360', '240', '144', 'audio', 'audio_opus', 'audio_m4a'].includes(quality)) {
     return res.status(400).json({ success: false, error: 'Pilihan kualitas tidak valid.' });
   }
   try {
