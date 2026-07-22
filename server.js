@@ -444,7 +444,9 @@ async function runCreatorWatchCheck() {
               title: `📢 ${data.name} upload baru`,
               body: latest.title,
               url: latest.url || '/'
-            }).catch(() => {});
+            }).then(r => {
+              if (!r.ok) console.warn(`[creatorWatch] Gagal kirim push ke ${subId}: ${r.reason}`);
+            }).catch(e => console.error(`[creatorWatch] Error kirim push ke ${subId}:`, e.message));
           }
         }
         await doc.ref.set({ lastVideoId: latest.id, lastVideoTitle: latest.title, lastCheckedAt: Date.now() }, { merge: true });
